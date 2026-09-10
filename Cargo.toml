@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "regicide-core",
+    "regicide-api",
+]
+resolver = "2"
