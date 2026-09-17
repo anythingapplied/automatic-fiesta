@@ -1,0 +1,1645 @@
+From b6ab8e24a29414bfaf3ccf34492743a6058b603a Mon Sep 17 00:00:00 2001
+From: Luke Alfuth <luke.alfuth@gmail.com>
+Date: Thu, 17 Sep 2026 04:29:03 +0000
+Subject: [PATCH 3/4] frontend: rework scaling, make the turn chime audible,
+ fix crashes
+
+Sizing was pinned to viewport width (w-[11vw]) or fixed pixels inside a
+layout constrained by height. An 8-card solo hand overflowed the screen by
+39-50px on every common phone. Card size now derives from a dvh height
+budget with hand slots on flex-basis:0, so overflow is structurally
+impossible and cards grow on desktop instead of capping at 95px. The grid
+middle row is minmax(0,1fr) so the arena can actually shrink, the shell
+uses 100dvh and safe-area insets, and a fluid type ramp replaces the fixed
+7/8/9/10px labels. In Play / Last Play are no longer hidden on mobile.
+
+The turn chime could never sound. A suspended AudioContext has a frozen
+clock, and the whole 3.2s envelope was scheduled synchronously against
+currentTime after a fire-and-forget resume(), so it was always already in
+the past. The context was also only created from a React effect, never a
+user gesture, so on iOS it stayed suspended permanently. Audio is armed on
+first interaction and playback resumes before scheduling. The trigger rule
+moved to turnChime.ts with unit tests, matching the reconnectLogic pattern.
+
+Adds a mute toggle for the chime, persisted to localStorage.
+
+last_discarded has always been tracked in core and cleared on a Hearts
+shuffle, but nothing rendered it. It now shows in the arena.
+
+Crash fixes: players[myPlayerId] was dereferenced unguarded in App and HUD,
+and the seat came from parseInt(localStorage), so a corrupt value gave
+players[NaN]. createGame ignored res.ok. JSON.parse on the socket was
+unguarded. Effect expiry timers were never cleared on unmount.
+
+scheduleReconnect was used before its declaration and only worked because
+onclose fires asynchronously; the back edge goes through a ref now.
+
+Also: the HUD draw-effect target compared the current index to itself,
+ActionFooter took a discardRemaining prop it never used, and App.css was
+unimported Vite scaffolding.
+---
+ frontend/src/App.css                     | 184 -----------------------
+ frontend/src/App.tsx                     |  67 +++++----
+ frontend/src/Card.tsx                    |  16 +-
+ frontend/src/components/ActionFooter.tsx |  32 ++--
+ frontend/src/components/Arena.tsx        | 107 ++++++++-----
+ frontend/src/components/HUD.tsx          | 105 ++++++++-----
+ frontend/src/components/HandArea.tsx     |  64 +++++---
+ frontend/src/hooks/useGameLogic.ts       | 137 +++++++++++++----
+ frontend/src/index.css                   |  99 +++++++++++-
+ frontend/src/sound.ts                    |  93 +++++++++++-
+ frontend/src/turnChime.ts                |  26 ++++
+ frontend/src/types.ts                    |   3 +
+ frontend/unit/turnChime.test.ts          |  27 ++++
+ 13 files changed, 589 insertions(+), 371 deletions(-)
+ delete mode 100644 frontend/src/App.css
+ create mode 100644 frontend/src/turnChime.ts
+ create mode 100644 frontend/unit/turnChime.test.ts
+
+diff --git a/frontend/src/App.css b/frontend/src/App.css
+deleted file mode 100644
+index f90339d..0000000
+--- a/frontend/src/App.css
++++ /dev/null
+@@ -1,184 +0,0 @@
+-.counter {
+-  font-size: 16px;
+-  padding: 5px 10px;
+-  border-radius: 5px;
+-  color: var(--accent);
+-  background: var(--accent-bg);
+-  border: 2px solid transparent;
+-  transition: border-color 0.3s;
+-  margin-bottom: 24px;
+-
+-  &:hover {
+-    border-color: var(--accent-border);
+-  }
+-  &:focus-visible {
+-    outline: 2px solid var(--accent);
+-    outline-offset: 2px;
+-  }
+-}
+-
+-.hero {
+-  position: relative;
+-
+-  .base,
+-  .framework,
+-  .vite {
+-    inset-inline: 0;
+-    margin: 0 auto;
+-  }
+-
+-  .base {
+-    width: 170px;
+-    position: relative;
+-    z-index: 0;
+-  }
+-
+-  .framework,
+-  .vite {
+-    position: absolute;
+-  }
+-
+-  .framework {
+-    z-index: 1;
+-    top: 34px;
+-    height: 28px;
+-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
+-      scale(1.4);
+-  }
+-
+-  .vite {
+-    z-index: 0;
+-    top: 107px;
+-    height: 26px;
+-    width: auto;
+-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
+-      scale(0.8);
+-  }
+-}
+-
+-#center {
+-  display: flex;
+-  flex-direction: column;
+-  gap: 25px;
+-  place-content: center;
+-  place-items: center;
+-  flex-grow: 1;
+-
+-  @media (max-width: 1024px) {
+-    padding: 32px 20px 24px;
+-    gap: 18px;
+-  }
+-}
+-
+-#next-steps {
+-  display: flex;
+-  border-top: 1px solid var(--border);
+-  text-align: left;
+-
+-  & > div {
+-    flex: 1 1 0;
+-    padding: 32px;
+-    @media (max-width: 1024px) {
+-      padding: 24px 20px;
+-    }
+-  }
+-
+-  .icon {
+-    margin-bottom: 16px;
+-    width: 22px;
+-    height: 22px;
+-  }
+-
+-  @media (max-width: 1024px) {
+-    flex-direction: column;
+-    text-align: center;
+-  }
+-}
+-
+-#docs {
+-  border-right: 1px solid var(--border);
+-
+-  @media (max-width: 1024px) {
+-    border-right: none;
+-    border-bottom: 1px solid var(--border);
+-  }
+-}
+-
+-#next-steps ul {
+-  list-style: none;
+-  padding: 0;
+-  display: flex;
+-  gap: 8px;
+-  margin: 32px 0 0;
+-
+-  .logo {
+-    height: 18px;
+-  }
+-
+-  a {
+-    color: var(--text-h);
+-    font-size: 16px;
+-    border-radius: 6px;
+-    background: var(--social-bg);
+-    display: flex;
+-    padding: 6px 12px;
+-    align-items: center;
+-    gap: 8px;
+-    text-decoration: none;
+-    transition: box-shadow 0.3s;
+-
+-    &:hover {
+-      box-shadow: var(--shadow);
+-    }
+-    .button-icon {
+-      height: 18px;
+-      width: 18px;
+-    }
+-  }
+-
+-  @media (max-width: 1024px) {
+-    margin-top: 20px;
+-    flex-wrap: wrap;
+-    justify-content: center;
+-
+-    li {
+-      flex: 1 1 calc(50% - 8px);
+-    }
+-
+-    a {
+-      width: 100%;
+-      justify-content: center;
+-      box-sizing: border-box;
+-    }
+-  }
+-}
+-
+-#spacer {
+-  height: 88px;
+-  border-top: 1px solid var(--border);
+-  @media (max-width: 1024px) {
+-    height: 48px;
+-  }
+-}
+-
+-.ticks {
+-  position: relative;
+-  width: 100%;
+-
+-  &::before,
+-  &::after {
+-    content: '';
+-    position: absolute;
+-    top: -4.5px;
+-    border: 5px solid transparent;
+-  }
+-
+-  &::before {
+-    left: 0;
+-    border-left-color: var(--border);
+-  }
+-  &::after {
+-    right: 0;
+-    border-right-color: var(--border);
+-  }
+-}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 082db8b..2ca8092 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -32,8 +32,8 @@ const FlightOverlay: React.FC<{ flight: DefeatFlight; onDone: () => void }> = ({
+ const App: React.FC = () => {
+     const {
+         gameId, myPlayerId, roster, localGameState, selectedIndices, copySuccess, showGameOver, setShowGameOver, activeEffects,
+-        defeatFlight, finishDefeatFlight, reconnecting,
+-        sortedHand, currentDiscardValue, damageNeeded, isMyTurn, isSolo, isSpectator, discardRemaining, isImmuneWarning,
++        defeatFlight, finishDefeatFlight, reconnecting, seatedPlayer, canYield, currentTierEnemies, muted, toggleMute, isSpectator,
++        sortedHand, currentDiscardValue, damageNeeded, isMyTurn, isSolo, discardRemaining, isImmuneWarning,
+         createGame, joinGame, sendAction, toggleCard, chooseNextPlayer, copyId, exitToMenu, restartTable, startNewGame, renamePlayer
+     } = useGameLogic();
+ 
+@@ -46,39 +46,39 @@ const App: React.FC = () => {
+ 
+     if (!gameId) {
+         return (
+-            <div className="flex flex-col items-center justify-center min-h-screen bg-slate-900 text-white p-4 text-center overflow-hidden">
++            <div className="board-shell flex flex-col items-center justify-center bg-slate-900 text-white p-4 text-center overflow-y-auto">
+                 <motion.h1 
+                     initial={{ y: -50, opacity: 0 }} 
+                     animate={{ y: 0, opacity: 1 }}
+-                    className="text-6xl font-black mb-12 italic uppercase tracking-widest text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-purple-600"
++                    className="text-[clamp(2.25rem,11vw,4.5rem)] font-black mb-6 sm:mb-12 italic uppercase tracking-widest text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-purple-600"
+                 >
+                     REGICIDE
+                 </motion.h1>
+-                <div className="bg-slate-800 p-8 rounded-3xl shadow-2xl w-full max-w-md border border-slate-700">
+-                    <h2 className="text-xl font-bold mb-6 text-slate-300">New Game</h2>
++                <div className="bg-slate-800 p-5 sm:p-8 rounded-3xl shadow-2xl w-full max-w-md border border-slate-700">
++                    <h2 className="text-lg sm:text-xl font-bold mb-4 sm:mb-6 text-slate-300">New Game</h2>
+                     <input 
+                         type="text" 
+                         placeholder="YOUR NAME" 
+                         value={playerName}
+                         onChange={(e) => setPlayerName(e.target.value)}
+-                        className="w-full bg-slate-900 border border-slate-700 rounded-2xl py-3 px-4 text-center font-bold focus:ring-2 focus:ring-blue-500 outline-none text-sm mb-6" 
++                        className="w-full bg-slate-900 border border-slate-700 rounded-2xl py-3 px-4 text-center font-bold focus:ring-2 focus:ring-blue-500 outline-none t-body mb-4 sm:mb-6" 
+                         maxLength={20}
+                     />
+-                    <div className="grid grid-cols-2 gap-4 mb-10">
++                    <div className="grid grid-cols-2 gap-3 sm:gap-4 mb-6 sm:mb-10">
+                         {[1, 2, 3, 4].map(n => (
+-                            <button key={n} onClick={() => createGame(n)} className="bg-blue-600 hover:bg-blue-500 text-white font-black py-5 rounded-2xl shadow-lg active:scale-95 transition-all text-lg">
++                            <button key={n} onClick={() => createGame(n)} className="bg-blue-600 hover:bg-blue-500 text-white font-black py-4 sm:py-5 rounded-2xl shadow-lg active:scale-95 transition-all text-base sm:text-lg">
+                                 {n} Player{n > 1 ? 's' : ''}
+                             </button>
+                         ))}
+                     </div>
+-                    <div className="relative mb-6">
++                    <div className="relative mb-4 sm:mb-6">
+                         <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-700"></div></div>
+-                        <div className="relative flex justify-center text-sm"><span className="px-3 bg-slate-800 text-slate-500 font-bold uppercase tracking-widest">or join room</span></div>
++                        <div className="relative flex justify-center"><span className="t-label px-3 bg-slate-800 text-slate-500 font-bold uppercase tracking-widest">or join room</span></div>
+                     </div>
+                     <input 
+                         type="text" 
+                         placeholder="PASTE GAME LINK" 
+-                        className="w-full bg-slate-900 border border-slate-700 rounded-2xl py-5 px-4 text-center font-mono focus:ring-2 focus:ring-blue-500 outline-none uppercase text-lg" 
++                        className="w-full bg-slate-900 border border-slate-700 rounded-2xl py-4 sm:py-5 px-4 text-center font-mono focus:ring-2 focus:ring-blue-500 outline-none uppercase text-base sm:text-lg" 
+                         onKeyDown={(e) => { if (e.key === 'Enter') joinGame(e.currentTarget.value.trim()); }} 
+                     />
+                 </div>
+@@ -86,11 +86,14 @@ const App: React.FC = () => {
+         );
+     }
+ 
+-    if (!localGameState || myPlayerId === null) return (
+-        <div className="flex flex-col items-center justify-center min-h-screen bg-slate-900 text-white p-4">
++    // `seatedPlayer` is null while the state is still arriving AND whenever the
++    // stored seat no longer exists on this table, which used to crash the board
++    // on `players[myPlayerId].hand`.
++    if (!localGameState || myPlayerId === null || (!isSpectator && !seatedPlayer)) return (
++        <div className="board-shell flex flex-col items-center justify-center bg-slate-900 text-white p-4">
+             <div className="animate-pulse flex flex-col items-center">
+                 <div className="text-6xl mb-6">⚔️</div>
+-                <div className="text-sm font-black uppercase tracking-widest text-slate-500 text-center leading-loose">Entering the Castle...</div>
++                <div className="t-label font-black uppercase tracking-widest text-slate-500 text-center leading-loose">Entering the Castle...</div>
+             </div>
+         </div>
+     );
+@@ -98,7 +101,7 @@ const App: React.FC = () => {
+     const isDiscarding = damageNeeded > 0;
+ 
+     return (
+-        <div className="fixed inset-0 bg-slate-950 text-slate-100 grid grid-rows-[auto_1fr_auto] overflow-hidden max-w-6xl mx-auto font-sans">
++        <div className="board-shell bg-slate-950 text-slate-100 grid grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden max-w-6xl mx-auto font-sans">
+             {/* HUD Row */}
+             <HUD 
+                 gameId={gameId}
+@@ -109,7 +112,10 @@ const App: React.FC = () => {
+                 copySuccess={copySuccess}
+                 activeEffects={activeEffects}
+                 reconnecting={reconnecting}
++                currentTierEnemies={currentTierEnemies}
++                muted={muted}
+                 onMenuClick={exitToMenu}
++                onToggleMute={toggleMute}
+                 onCopyIdClick={copyId}
+                 onSoloJesterClick={() => sendAction({ type: 'UseSoloJester' })}
+                 onNewGameClick={() => setShowNewGame(true)}
+@@ -129,7 +135,7 @@ const App: React.FC = () => {
+                 {isSpectator ? (
+                     <div data-testid="spectator-bar" className="flex items-center justify-center gap-2 py-6 text-slate-400">
+                         <span className="text-lg">👁</span>
+-                        <span className="text-xs font-black uppercase tracking-widest">You're watching — new games can be started from the HUD</span>
++                        <span className="t-micro font-black uppercase tracking-widest text-center px-4">You're watching — new games can be started from the HUD</span>
+                     </div>
+                 ) : (
+                     <>
+@@ -144,9 +150,10 @@ const App: React.FC = () => {
+                             enemySuit={localGameState.active_enemy?.card.suit || null}
+                             isJesterActive={localGameState.active_enemy?.is_jester_active || false}
+                             onCardClick={toggleCard}
+-                            actualHand={localGameState.players[myPlayerId].hand}
++                            actualHand={seatedPlayer?.hand ?? []}
+                             currentPlayerIndex={localGameState.current_player_index}
+                             discardRemaining={discardRemaining}
++                            playerNames={localGameState.players.map(p => p.name)}
+                         />
+ 
+                         <ActionFooter 
+@@ -156,6 +163,7 @@ const App: React.FC = () => {
+                             discardRemaining={discardRemaining}
+                             currentDiscardValue={currentDiscardValue}
+                             isSolo={isSolo}
++                            canYield={canYield}
+                             isImmuneWarning={isImmuneWarning}
+                             phase={localGameState.phase}
+                             players={localGameState.players}
+@@ -178,25 +186,25 @@ const App: React.FC = () => {
+                 {localGameState.status !== 'InProgress' && showGameOver && (
+                     <motion.div 
+                         initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+-                        className="fixed inset-0 bg-slate-950/80 flex items-center justify-center p-8 z-[200] backdrop-blur-sm text-center"
++                        className="fixed inset-0 bg-slate-950/80 flex items-center justify-center p-5 sm:p-8 z-[200] backdrop-blur-sm text-center overflow-y-auto"
+                     >
+                         <motion.div 
+                             initial={{ scale: 0.9, y: 50 }} animate={{ scale: 1, y: 0 }}
+-                            className="bg-slate-800/95 p-12 rounded-[3rem] shadow-[0_0_100px_rgba(0,0,0,0.8)] border border-slate-700 w-full max-w-sm relative"
++                            className="bg-slate-800/95 p-6 sm:p-12 rounded-[2rem] sm:rounded-[3rem] shadow-[0_0_100px_rgba(0,0,0,0.8)] border border-slate-700 w-full max-w-sm relative my-auto"
+                         >
+-                            <button onClick={() => setShowGameOver(false)} className="absolute -top-4 -right-4 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black px-6 py-2.5 rounded-full border border-slate-600 shadow-xl uppercase">View Board</button>
+-                            <div className="text-8xl mb-8 animate-bounce">{localGameState.status === 'Won' ? '🏆' : '💀'}</div>
+-                            <h2 className="text-5xl font-black mb-4 tracking-tighter italic uppercase text-transparent bg-clip-text bg-gradient-to-b from-white to-slate-400">
++                            <button onClick={() => setShowGameOver(false)} className="t-micro absolute -top-3 -right-2 sm:-top-4 sm:-right-4 bg-slate-700 hover:bg-slate-600 text-white font-black px-4 sm:px-6 py-2 sm:py-2.5 rounded-full border border-slate-600 shadow-xl uppercase">View Board</button>
++                            <div className="text-[clamp(3rem,16vw,5rem)] mb-4 sm:mb-8 animate-bounce leading-none">{localGameState.status === 'Won' ? '🏆' : '💀'}</div>
++                            <h2 className="text-[clamp(2rem,10vw,3rem)] font-black mb-4 tracking-tighter italic uppercase text-transparent bg-clip-text bg-gradient-to-b from-white to-slate-400">
+                                 {localGameState.status === 'Won' ? 'Victory' : 'Defeated'}
+                             </h2>
+                             {typeof localGameState.status === 'object' && 'Lost' in localGameState.status && (
+-                                <p className="text-slate-300 mb-10 font-bold bg-black/30 p-5 rounded-2xl text-sm leading-relaxed border border-white/5">
+-                                    {(localGameState.status as any).Lost}
++                                <p className="t-body text-slate-300 mb-6 sm:mb-10 font-bold bg-black/30 p-4 sm:p-5 rounded-2xl leading-relaxed border border-white/5">
++                                    {localGameState.status.Lost}
+                                 </p>
+                             )}
+-                            <button onClick={restartTable} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-6 rounded-[2rem] shadow-2xl transition-all active:scale-95 border-b-4 border-blue-800 uppercase tracking-widest text-xs mb-4">Play Again</button>
+-                            <button onClick={() => setShowNewGame(true)} className="w-full bg-amber-600 hover:bg-amber-500 text-white font-black py-6 rounded-[2rem] shadow-2xl transition-all active:scale-95 border-b-4 border-amber-800 uppercase tracking-widest text-xs mb-4">New Game</button>
+-                            <button onClick={exitToMenu} className="w-full bg-slate-700 hover:bg-slate-600 text-white font-black py-6 rounded-[2rem] shadow-2xl transition-all active:scale-95 border-b-4 border-slate-900 uppercase tracking-widest text-xs">Main Menu</button>
++                            <button onClick={restartTable} className="t-label w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-4 sm:py-6 rounded-[1.5rem] sm:rounded-[2rem] shadow-2xl transition-all active:scale-95 border-b-4 border-blue-800 uppercase tracking-widest mb-3 sm:mb-4">Play Again</button>
++                            <button onClick={() => setShowNewGame(true)} className="t-label w-full bg-amber-600 hover:bg-amber-500 text-white font-black py-4 sm:py-6 rounded-[1.5rem] sm:rounded-[2rem] shadow-2xl transition-all active:scale-95 border-b-4 border-amber-800 uppercase tracking-widest mb-3 sm:mb-4">New Game</button>
++                            <button onClick={exitToMenu} className="t-label w-full bg-slate-700 hover:bg-slate-600 text-white font-black py-4 sm:py-6 rounded-[1.5rem] sm:rounded-[2rem] shadow-2xl transition-all active:scale-95 border-b-4 border-slate-900 uppercase tracking-widest">Main Menu</button>
+                         </motion.div>
+                     </motion.div>
+                 )}
+@@ -233,7 +241,8 @@ const App: React.FC = () => {
+                 <motion.button 
+                     initial={{ y: 100 }} animate={{ y: 0 }}
+                     onClick={() => setShowGameOver(true)} 
+-                    className="fixed bottom-12 left-1/2 -translate-x-1/2 bg-blue-600 hover:bg-blue-500 text-white font-black px-10 py-5 rounded-full shadow-2xl z-[110] border-b-4 border-blue-800 uppercase text-xs tracking-widest animate-pulse"
++                    className="t-label fixed left-1/2 -translate-x-1/2 bg-blue-600 hover:bg-blue-500 text-white font-black px-8 sm:px-10 py-4 sm:py-5 rounded-full shadow-2xl z-[110] border-b-4 border-blue-800 uppercase tracking-widest animate-pulse"
++                    style={{ bottom: 'calc(var(--safe-b) + 3rem)' }}
+                 >
+                     Show Result
+                 </motion.button>
+diff --git a/frontend/src/Card.tsx b/frontend/src/Card.tsx
+index d0c2a45..8beb384 100644
+--- a/frontend/src/Card.tsx
++++ b/frontend/src/Card.tsx
+@@ -12,7 +12,9 @@ interface CardProps {
+     layoutId?: string;
+ }
+ 
+-export const getCardFileName = (card: CardType): string => {
++// Module-private: exporting a non-component from a component file breaks Fast
++// Refresh, and nothing outside this file uses it.
++const getCardFileName = (card: CardType): string => {
+     if (card.rank === 'Joker') {
+         return 'Joker.svg'; 
+     }
+@@ -37,7 +39,7 @@ export const getCardFileName = (card: CardType): string => {
+ const Card: React.FC<CardProps> = ({ card, isBack, isEmpty, onClick, selected, className, layoutId }) => {
+     if (isEmpty) {
+         return (
+-            <div className={`aspect-[5/7] border-2 border-slate-800/30 bg-slate-950/20 flex-shrink-0 ${className}`} />
++            <div className={`aspect-[5/7] border-2 border-slate-800/30 bg-slate-950/20 flex-shrink-0 ${className ?? ''}`} />
+         );
+     }
+ 
+@@ -48,20 +50,22 @@ const Card: React.FC<CardProps> = ({ card, isBack, isEmpty, onClick, selected, c
+         <motion.div 
+             layoutId={layoutId}
+             onClick={onClick}
+-            // Standardize rising levels
++            // Lift is a share of the card's own height rather than a fixed 24px,
++            // so selection reads the same on a 60px phone card and a 120px
++            // desktop one instead of nearly clearing the small card.
+             animate={{ 
+-                y: selected ? -24 : 0,
++                y: selected ? '-16%' : 0,
+                 scale: 1,
+                 opacity: 1
+             }}
+-            whileHover={onClick && !selected ? { y: -8 } : {}}
++            whileHover={onClick && !selected ? { y: '-6%' } : {}}
+             whileTap={onClick ? { scale: 0.95 } : {}}
+             // Selection should be instant, no "normal delay" getting there
+             transition={selected ? { duration: 0 } : { type: 'spring', stiffness: 300, damping: 20 }}
+             className={`transition-shadow aspect-[5/7] flex-shrink-0
+                 ${selected ? 'ring-4 ring-blue-500 shadow-[0_40px_60px_-10px_rgba(59,130,246,0.5)] z-50' : 'shadow-md'} 
+                 ${onClick ? 'cursor-pointer' : ''}
+-                ${className}`}
++                ${className ?? ''}`}
+         >
+             <img 
+                 src={src} 
+diff --git a/frontend/src/components/ActionFooter.tsx b/frontend/src/components/ActionFooter.tsx
+index 92aae50..99b368a 100644
+--- a/frontend/src/components/ActionFooter.tsx
++++ b/frontend/src/components/ActionFooter.tsx
+@@ -8,6 +8,7 @@ interface ActionFooterProps {
+     discardRemaining: number;
+     currentDiscardValue: number;
+     isSolo: boolean;
++    canYield: boolean;
+     isImmuneWarning: boolean;
+     phase: TurnPhase;
+     players: Player[];
+@@ -18,18 +19,19 @@ interface ActionFooterProps {
+ }
+ 
+ const ActionFooter: React.FC<ActionFooterProps> = ({
+-    isMyTurn, selectedIndicesCount, damageNeeded,
+-    currentDiscardValue, isSolo, isImmuneWarning,
++    isMyTurn, selectedIndicesCount, damageNeeded, discardRemaining,
++    currentDiscardValue, isSolo, canYield, isImmuneWarning,
+     phase, players, myPlayerId,
+     onAttackClick, onYieldClick, onChooseNextPlayer
+ }) => {
+     const isDiscarding = damageNeeded > 0;
+     const showWarning = isImmuneWarning && !isDiscarding;
++    const btn = "t-label font-black py-2.5 sm:py-3.5 rounded-xl sm:rounded-2xl shadow-xl transition-all active:translate-y-1 border-b-4 uppercase tracking-widest";
+ 
+     if (phase === 'AwaitingNextPlayer') {
+         return (
+-            <div className="flex-shrink-0 flex flex-col gap-2 pb-4 pt-1 bg-slate-900/80 backdrop-blur-md z-[100]">
+-                <div className="text-center text-[10px] font-black uppercase tracking-widest text-purple-300">
++            <div className="board-footer flex-shrink-0 flex flex-col gap-2 pt-1 bg-slate-900/80 backdrop-blur-md z-[100]">
++                <div className="t-micro text-center font-black uppercase tracking-widest text-purple-300 px-4">
+                     {isMyTurn ? 'Jester played — choose who goes next' : 'Waiting for the Jester player to choose…'}
+                 </div>
+                 {isMyTurn && (
+@@ -41,7 +43,7 @@ const ActionFooter: React.FC<ActionFooterProps> = ({
+                             <button
+                                 key={i}
+                                 onClick={() => onChooseNextPlayer(i)}
+-                                className="bg-purple-600 border-purple-800 hover:bg-purple-500 text-white font-black py-2.5 px-4 rounded-2xl shadow-xl transition-all active:translate-y-1 border-b-4 uppercase text-[10px] tracking-widest"
++                                className={`${btn} bg-purple-600 border-purple-800 hover:bg-purple-500 text-white px-4`}
+                             >
+                                 {p.name || `Player ${i + 1}`}{i === myPlayerId ? ' (You)' : ''}
+                             </button>
+@@ -53,27 +55,31 @@ const ActionFooter: React.FC<ActionFooterProps> = ({
+     }
+ 
+     return (
+-        <div className="flex-shrink-0 flex flex-col gap-2 pb-4 pt-1 bg-slate-900/80 backdrop-blur-md z-[100]">
+-            <div className="grid grid-cols-2 gap-4 max-w-md mx-auto w-full px-4 pb-1">
++        <div className="board-footer flex-shrink-0 flex flex-col gap-2 pt-1 bg-slate-900/80 backdrop-blur-md z-[100]">
++            <div className="grid grid-cols-2 gap-3 sm:gap-4 max-w-md mx-auto w-full px-3 sm:px-4 pb-1">
+                 {damageNeeded === 0 ? (
+                     <>
+                         <button 
+                             disabled={!isMyTurn || selectedIndicesCount === 0} 
+                             onClick={onAttackClick} 
+-                            className={`${isSolo ? 'col-span-2' : ''} bg-blue-600 border-blue-800 relative disabled:opacity-20 hover:brightness-110 text-white font-black py-3.5 rounded-2xl shadow-xl transition-all active:translate-y-1 border-b-4 uppercase text-[10px] tracking-widest`}
++                            className={`${isSolo ? 'col-span-2' : ''} ${btn} bg-blue-600 border-blue-800 relative disabled:opacity-20 hover:brightness-110 text-white`}
+                         >
+                             Attack
+                             {showWarning && (
+-                                <span className="absolute -top-3 -right-3 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center text-sm font-black border-2 border-white shadow-xl animate-bounce">
++                                <span className="t-body absolute -top-3 -right-3 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center font-black border-2 border-white shadow-xl animate-bounce">
+                                     !
+                                 </span>
+                             )}
+                         </button>
+                         {!isSolo && (
+                             <button 
+-                                disabled={!isMyTurn || selectedIndicesCount > 0} 
++                                // Yielding is illegal once every other player has
++                                // yielded on their last turn; the server rejects it
++                                // silently, so don't offer it.
++                                disabled={!isMyTurn || selectedIndicesCount > 0 || !canYield} 
+                                 onClick={onYieldClick} 
+-                                className="bg-slate-700 border-slate-900 disabled:opacity-20 hover:bg-slate-600 text-white font-black py-3.5 rounded-2xl shadow-xl transition-all active:translate-y-1 border-b-4 uppercase text-[10px] tracking-widest"
++                                title={!canYield ? 'Everyone else has already yielded — you must play a card' : undefined}
++                                className={`${btn} bg-slate-700 border-slate-900 disabled:opacity-20 hover:bg-slate-600 text-white`}
+                             >
+                                 Yield
+                             </button>
+@@ -83,9 +89,9 @@ const ActionFooter: React.FC<ActionFooterProps> = ({
+                     <button 
+                         disabled={!isMyTurn || currentDiscardValue < damageNeeded} 
+                         onClick={onAttackClick} 
+-                        className="col-span-2 bg-red-600 border-red-800 disabled:opacity-20 hover:bg-red-500 text-white font-black py-3.5 rounded-2xl shadow-xl transition-all active:translate-y-1 border-b-4 uppercase text-[10px] tracking-widest text-center"
++                        className={`col-span-2 ${btn} bg-red-600 border-red-800 disabled:opacity-20 hover:bg-red-500 text-white text-center`}
+                     >
+-                        Confirm Discard
++                        {discardRemaining > 0 ? `Discard ${discardRemaining} More` : 'Confirm Discard'}
+                     </button>
+                 )}
+             </div>
+diff --git a/frontend/src/components/Arena.tsx b/frontend/src/components/Arena.tsx
+index 30e1548..245509a 100644
+--- a/frontend/src/components/Arena.tsx
++++ b/frontend/src/components/Arena.tsx
+@@ -15,9 +15,10 @@ const Arena: React.FC<ArenaProps> = ({ gameState, activeEffects, isImmuneWarning
+     const showWarning = isImmuneWarning && !isDiscarding;
+ 
+     return (
+-        <div className="flex-1 flex flex-row items-center justify-center gap-4 lg:gap-12 relative min-h-0 py-4 w-full max-w-6xl mx-auto px-4 overflow-hidden">
+-            {/* Left: In Play Sidebar */}
+-            <div className="hidden md:flex flex-col items-center gap-4 flex-shrink-0 w-28">
++        <div className="min-h-0 flex flex-row items-stretch justify-center gap-2 sm:gap-4 lg:gap-12 relative py-2 sm:py-4 w-full max-w-6xl mx-auto px-2 sm:px-4 overflow-hidden">
++            {/* Left: In Play. Kept as a flex sibling (not an overlay) at every
++                width so it can never cover the board; it just gets narrower. */}
++            <div className="flex flex-col items-center justify-center gap-2 sm:gap-3 flex-shrink-0 w-12 sm:w-16 md:w-28">
+                 <AnimatePresence>
+                     {gameState.played_cards.length > 0 && (
+                         <motion.div 
+@@ -25,21 +26,45 @@ const Arena: React.FC<ArenaProps> = ({ gameState, activeEffects, isImmuneWarning
+                             animate={{ x: 0, opacity: 1 }} 
+                             exit={{ x: -50, opacity: 0 }}
+                             data-testid="in-play-area" 
+-                            className="bg-slate-800/40 backdrop-blur-sm border border-slate-700/50 p-3 rounded-2xl flex flex-col items-center shadow-xl"
++                            className="bg-slate-800/40 backdrop-blur-sm border border-slate-700/50 p-1.5 md:p-3 rounded-xl md:rounded-2xl flex flex-col items-center shadow-xl w-full"
+                         >
+-                            <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">In Play</span>
++                            <span className="t-micro font-black text-blue-400 uppercase tracking-widest mb-0.5 md:mb-1 text-center leading-tight">In Play</span>
+                             <div className="flex flex-col items-center">
+-                                <span className="text-2xl font-black text-white">{gameState.played_cards.length}</span>
+-                                <span className="text-[8px] opacity-50 uppercase font-bold">Cards</span>
++                                <span className="t-stat font-black text-white leading-none">{gameState.played_cards.length}</span>
++                                <span className="t-micro opacity-50 uppercase font-bold hidden md:block">Cards</span>
+                             </div>
+                         </motion.div>
+                     )}
+                 </AnimatePresence>
++
++                {/* What the last player threw away to soak the enemy's hit.
++                    The core has tracked this all along (and clears it when a
++                    Hearts shuffle invalidates it) but nothing ever showed it. */}
++                <AnimatePresence>
++                    {gameState.last_discarded && gameState.last_discarded.length > 0 && (
++                        <motion.div
++                            initial={{ x: -50, opacity: 0 }}
++                            animate={{ x: 0, opacity: 1 }}
++                            exit={{ x: -50, opacity: 0 }}
++                            data-testid="last-discarded-area"
++                            className="bg-slate-800/40 backdrop-blur-sm border border-slate-700/50 p-1.5 md:p-2 rounded-xl md:rounded-2xl flex flex-col items-center shadow-xl w-full"
++                        >
++                            <span className="t-micro font-black text-slate-400 uppercase tracking-widest mb-1 text-center leading-tight">Discarded</span>
++                            <div className="flex gap-0.5 md:gap-1 flex-wrap justify-center w-full">
++                                {gameState.last_discarded.slice(0, 4).map((c) => <Card key={c.id} card={c} className="thumb-card shadow-lg" />)}
++                            </div>
++                            {gameState.last_discarded.length > 4 && (
++                                <span className="t-micro font-black text-slate-500 mt-0.5">+{gameState.last_discarded.length - 4}</span>
++                            )}
++                        </motion.div>
++                    )}
++                </AnimatePresence>
+             </div>
+ 
+-            {/* Center: Active Enemy */}
+-            {/* Increased pt to 8 to prevent ! clipping */}
+-            <div data-testid="enemy-area" className="flex flex-col items-center justify-center gap-4 flex-1 h-full max-h-[50vh] relative pt-8">
++            {/* Center: Active Enemy. The card region is a flex child with
++                min-h-0, so the card is sized by whatever height this row
++                actually got rather than by a guessed vh fraction. */}
++            <div data-testid="enemy-area" className="flex flex-col items-center justify-center gap-2 sm:gap-3 flex-1 min-w-0 min-h-0 relative pt-5 sm:pt-7">
+                 {gameState.active_enemy ? (
+                     <>
+                         <motion.div 
+@@ -48,18 +73,20 @@ const Arena: React.FC<ArenaProps> = ({ gameState, activeEffects, isImmuneWarning
+                             animate={{ opacity: 1, y: 0, scale: 1 }} 
+                             transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                             data-testid="enemy-card"
+-                            className="relative h-[70%] max-h-[40vh] group"
++                            className="relative flex-1 min-h-0 flex items-center justify-center w-full group"
+                         >
+                             <div className="absolute inset-0 bg-red-500/20 blur-[60px] rounded-full scale-150 -z-10 group-hover:bg-red-500/30 transition-colors duration-500"></div>
+                             
+-                            <Card card={gameState.active_enemy.card} className="h-full w-auto aspect-[5/7] max-h-full relative z-10 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.7)] border border-white/10" />
++                            {/* object-contain inside means a narrow column letterboxes
++                                the art instead of stretching it. */}
++                            <Card card={gameState.active_enemy.card} className="h-full w-auto max-w-full relative z-10 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.7)] border border-white/10" />
+                             
+                             {/* Immunity Warning - Anchored to Card */}
+                             {showWarning && (
+                                 <motion.div 
+                                     animate={{ scale: [1, 1.2, 1], rotate: [0, 5, -5, 0] }} 
+                                     transition={{ repeat: Infinity, duration: 2 }} 
+-                                    className="absolute -top-6 left-1/2 -translate-x-1/2 bg-red-600 text-white font-black rounded-full w-10 h-10 flex items-center justify-center border-4 border-slate-900 z-[60] shadow-2xl text-2xl"
++                                    className="absolute -top-1 left-1/2 -translate-x-1/2 bg-red-600 text-white font-black rounded-full w-8 h-8 sm:w-10 sm:h-10 flex items-center justify-center border-4 border-slate-900 z-[60] shadow-2xl t-stat leading-none"
+                                 >
+                                     !
+                                 </motion.div>
+@@ -69,27 +96,27 @@ const Arena: React.FC<ArenaProps> = ({ gameState, activeEffects, isImmuneWarning
+                                 <motion.div 
+                                     initial={{ opacity: 0, y: 10 }} 
+                                     animate={{ opacity: 1, y: 0 }}
+-                                    className="absolute -bottom-3 left-1/2 -translate-x-1/2 bg-purple-600 px-4 py-1 rounded-full text-[10px] font-black border-2 border-purple-400 shadow-2xl z-50 whitespace-nowrap"
++                                    className="absolute bottom-0 left-1/2 -translate-x-1/2 bg-purple-600 px-2 sm:px-4 py-0.5 sm:py-1 rounded-full t-micro font-black border-2 border-purple-400 shadow-2xl z-50 whitespace-nowrap"
+                                 >
+                                     IMMUNITY CLEARED
+                                 </motion.div>
+                             )}
+                         </motion.div>
+                         
+-                        <div className="flex justify-center gap-8 relative z-20 flex-shrink-0 h-16 w-full">
+-                            <div className="bg-slate-900/80 backdrop-blur-md px-6 py-2 rounded-2xl border border-red-500/30 flex flex-col items-center min-w-[100px] shadow-2xl relative">
+-                                <span className="text-[10px] text-red-400 font-black uppercase tracking-tighter mb-0.5">Health</span>
+-                                <span className="text-2xl font-black text-white">{gameState.active_enemy.current_health}</span>
++                        <div className="flex justify-center gap-3 sm:gap-8 relative z-20 flex-shrink-0 w-full">
++                            <div className="bg-slate-900/80 backdrop-blur-md px-3 sm:px-6 py-1 sm:py-2 rounded-xl sm:rounded-2xl border border-red-500/30 flex flex-col items-center min-w-[4.5rem] sm:min-w-[100px] shadow-2xl relative">
++                                <span className="t-micro text-red-400 font-black uppercase tracking-tighter">Health</span>
++                                <span className="t-stat font-black text-white leading-none">{gameState.active_enemy.current_health}</span>
+                                 <AnimatePresence mode="popLayout">
+                                     {activeEffects.filter(e => e.type === 'damage').map(e => (
+                                         <motion.div 
+                                             key={e.id} 
+-                                            initial={{ x: 20, opacity: 0 }} 
+-                                            animate={{ x: 60, opacity: 1 }} 
+-                                            exit={{ x: 80, opacity: 0 }} 
+-                                            className="absolute left-full top-1/2 -translate-y-1/2 ml-2 pointer-events-none"
++                                            initial={{ x: 10, opacity: 0 }} 
++                                            animate={{ x: 30, opacity: 1 }} 
++                                            exit={{ x: 45, opacity: 0 }} 
++                                            className="absolute left-full top-1/2 -translate-y-1/2 ml-1 pointer-events-none"
+                                         >
+-                                            <span className="text-3xl font-black text-red-500 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)] whitespace-nowrap">
++                                            <span className="t-stat font-black text-red-500 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)] whitespace-nowrap">
+                                                 {e.value} ❤️
+                                             </span>
+                                         </motion.div>
+@@ -97,24 +124,24 @@ const Arena: React.FC<ArenaProps> = ({ gameState, activeEffects, isImmuneWarning
+                                 </AnimatePresence>
+                             </div>
+ 
+-                            <div className="bg-slate-900/80 backdrop-blur-md px-6 py-2 rounded-2xl border border-orange-500/30 flex flex-col items-center min-w-[100px] shadow-2xl relative">
+-                                <span className="text-[10px] text-orange-400 font-black uppercase tracking-tighter mb-0.5">Attack</span>
+-                                <div className="flex items-baseline gap-2">
++                            <div className="bg-slate-900/80 backdrop-blur-md px-3 sm:px-6 py-1 sm:py-2 rounded-xl sm:rounded-2xl border border-orange-500/30 flex flex-col items-center min-w-[4.5rem] sm:min-w-[100px] shadow-2xl relative">
++                                <span className="t-micro text-orange-400 font-black uppercase tracking-tighter">Attack</span>
++                                <div className="flex items-baseline gap-1.5">
+                                   {gameState.shield_value > 0 && (
+-                                    <span className="text-sm line-through opacity-40 decoration-2 text-white">{gameState.active_enemy.base_attack}</span>
++                                    <span className="t-label line-through opacity-40 decoration-2 text-white">{gameState.active_enemy.base_attack}</span>
+                                   )}
+-                                  <span className="text-2xl font-black text-white">{Math.max(0, gameState.active_enemy.base_attack - gameState.shield_value)}</span>
++                                  <span className="t-stat font-black text-white leading-none">{Math.max(0, gameState.active_enemy.base_attack - gameState.shield_value)}</span>
+                                 </div>
+                                 <AnimatePresence mode="popLayout">
+                                     {activeEffects.filter(e => e.type === 'shield').map(e => (
+                                         <motion.div 
+                                             key={e.id} 
+-                                            initial={{ x: 20, opacity: 0 }} 
+-                                            animate={{ x: 60, opacity: 1 }} 
+-                                            exit={{ x: 80, opacity: 0 }} 
+-                                            className="absolute left-full top-1/2 -translate-y-1/2 ml-2 pointer-events-none"
++                                            initial={{ x: 10, opacity: 0 }} 
++                                            animate={{ x: 30, opacity: 1 }} 
++                                            exit={{ x: 45, opacity: 0 }} 
++                                            className="absolute left-full top-1/2 -translate-y-1/2 ml-1 pointer-events-none"
+                                         >
+-                                            <span className="text-3xl font-black text-blue-400 drop-shadow-[0_0_15px_rgba(96,165,250,0.5)] whitespace-nowrap">
++                                            <span className="t-stat font-black text-blue-400 drop-shadow-[0_0_15px_rgba(96,165,250,0.5)] whitespace-nowrap">
+                                                 {e.value} 🛡️
+                                             </span>
+                                         </motion.div>
+@@ -127,7 +154,7 @@ const Arena: React.FC<ArenaProps> = ({ gameState, activeEffects, isImmuneWarning
+                     <motion.div 
+                         initial={{ scale: 0.8, opacity: 0 }} 
+                         animate={{ scale: 1, opacity: 1 }}
+-                        className="text-6xl font-black text-green-500 italic drop-shadow-[0_0_40px_rgba(34,197,94,0.4)] uppercase tracking-tighter"
++                        className="text-[clamp(2rem,9vw,4rem)] font-black text-green-500 italic drop-shadow-[0_0_40px_rgba(34,197,94,0.4)] uppercase tracking-tighter"
+                     >
+                         Victory!
+                     </motion.div>
+@@ -135,19 +162,19 @@ const Arena: React.FC<ArenaProps> = ({ gameState, activeEffects, isImmuneWarning
+             </div>
+ 
+             {/* Right: Last Play Sidebar */}
+-            <div className="hidden md:flex flex-col items-center gap-4 flex-shrink-0 w-28">
++            <div className="flex flex-col items-center justify-center gap-4 flex-shrink-0 w-12 sm:w-16 md:w-28">
+                 <AnimatePresence>
+-                    {gameState.last_played && (
++                    {gameState.last_played && gameState.last_played.length > 0 && (
+                         <motion.div 
+                             initial={{ x: 50, opacity: 0 }} 
+                             animate={{ x: 0, opacity: 1 }} 
+                             exit={{ x: 50, opacity: 0 }}
+                             data-testid="previous-play-area" 
+-                            className="bg-slate-800/40 backdrop-blur-sm border border-slate-700/50 p-2 rounded-2xl flex flex-col items-center shadow-xl"
++                            className="bg-slate-800/40 backdrop-blur-sm border border-slate-700/50 p-1.5 md:p-2 rounded-xl md:rounded-2xl flex flex-col items-center shadow-xl w-full"
+                         >
+-                            <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-2 text-center">Last Play</span>
+-                            <div className="flex gap-1 flex-wrap justify-center max-w-[80px]">
+-                                {gameState.last_played.map((c) => <Card key={c.id} card={c} className="w-8 h-11 shadow-lg" />)}
++                            <span className="t-micro font-black text-slate-400 uppercase tracking-widest mb-1 text-center leading-tight">Last Play</span>
++                            <div className="flex gap-0.5 md:gap-1 flex-wrap justify-center w-full">
++                                {gameState.last_played.map((c) => <Card key={c.id} card={c} className="thumb-card shadow-lg" />)}
+                             </div>
+                         </motion.div>
+                     )}
+diff --git a/frontend/src/components/HUD.tsx b/frontend/src/components/HUD.tsx
+index 482f874..f0839d6 100644
+--- a/frontend/src/components/HUD.tsx
++++ b/frontend/src/components/HUD.tsx
+@@ -12,16 +12,22 @@ interface HUDProps {
+     copySuccess: boolean;
+     activeEffects: CombatEffect[];
+     reconnecting: boolean;
++    muted: boolean;
++    currentTierEnemies: GameState['castle_deck'];
+     onMenuClick: () => void;
++    onToggleMute: () => void;
+     onCopyIdClick: () => void;
+     onSoloJesterClick: () => void;
+     onNewGameClick: () => void;
+     onRename: (name: string) => void;
+ }
+ 
++/** Solo play always starts with two Jesters, so the row always shows two slots. */
++const SOLO_JESTER_SLOTS = 2;
++
+ const HUD: React.FC<HUDProps> = ({ 
+-    myPlayerId, gameState, roster, isSpectator, copySuccess, activeEffects, reconnecting,
+-    onMenuClick, onCopyIdClick, onSoloJesterClick, onNewGameClick, onRename 
++    myPlayerId, gameState, roster, isSpectator, copySuccess, activeEffects, reconnecting, currentTierEnemies, muted,
++    onMenuClick, onToggleMute, onCopyIdClick, onSoloJesterClick, onNewGameClick, onRename 
+ }) => {
+     const isSolo = gameState.players.length === 1;
+     const me = isSpectator ? undefined : gameState.players[myPlayerId];
+@@ -52,16 +58,26 @@ const HUD: React.FC<HUDProps> = ({
+         setEditingName(false);
+     };
+ 
+-    const currentTierEnemies = gameState.active_enemy ? 
+-        gameState.castle_deck.filter(c => JSON.stringify(c.rank) === JSON.stringify(gameState.active_enemy?.card.rank))
+-        : [];
+-
+     return (
+-        <div data-testid="hud" className="z-[100] bg-slate-800/90 p-2 rounded-xl shadow-2xl border border-slate-700/50 backdrop-blur-md relative max-w-2xl mx-auto w-full flex-shrink-0">
+-            <div className="flex justify-between items-center px-1 mb-1">
+-                <div className="flex gap-1">
+-                    <button onClick={onMenuClick} className="bg-slate-700 text-[8px] font-black px-3 py-1 rounded-full border border-slate-600 shadow uppercase hover:bg-slate-600">Menu</button>
+-                    <button onClick={onNewGameClick} className="bg-amber-700 text-[8px] font-black px-3 py-1 rounded-full border border-amber-600 shadow uppercase hover:bg-amber-600" title="Start a new game in this room">New</button>
++        <div data-testid="hud" className="z-[100] bg-slate-800/90 p-1.5 sm:p-2 rounded-xl shadow-2xl border border-slate-700/50 backdrop-blur-md relative max-w-2xl mx-auto w-full flex-shrink-0">
++            <div className="flex justify-between items-center gap-1 px-1 mb-1">
++                <div className="flex gap-1 flex-shrink-0">
++                    <button onClick={onMenuClick} className="t-micro bg-slate-700 font-black px-2 sm:px-3 py-1 rounded-full border border-slate-600 shadow uppercase hover:bg-slate-600">Menu</button>
++                    <button onClick={onNewGameClick} className="t-micro bg-amber-700 font-black px-2 sm:px-3 py-1 rounded-full border border-amber-600 shadow uppercase hover:bg-amber-600" title="Start a new game in this room">New</button>
++                    {/* Solo never chimes (the turn comes straight back), so the
++                        control would be dead weight on the tightest layout. */}
++                    {!isSolo && (
++                        <button
++                            onClick={onToggleMute}
++                            aria-pressed={muted}
++                            aria-label={muted ? 'Turn the turn chime on' : 'Mute the turn chime'}
++                            title={muted ? 'Turn chime muted — click to unmute' : 'Turn chime on — click to mute'}
++                            data-testid="mute-toggle"
++                            className="t-micro bg-slate-700 font-black px-2 py-1 rounded-full border border-slate-600 shadow hover:bg-slate-600 leading-none"
++                        >
++                            {muted ? '🔕' : '🔔'}
++                        </button>
++                    )}
+                 </div>
+                 {editingName ? (
+                     <input
+@@ -71,66 +87,83 @@ const HUD: React.FC<HUDProps> = ({
+                         onChange={(e) => setDraftName(e.target.value)}
+                         onBlur={submitName}
+                         onKeyDown={(e) => { if (e.key === 'Enter') submitName(); if (e.key === 'Escape') cancelName(); }}
+-                        className="bg-blue-500 text-[9px] font-black px-4 py-1 rounded-full border-2 border-slate-900 shadow-xl tracking-widest whitespace-nowrap w-32 text-center outline-none"
++                        className="t-label bg-blue-500 font-black px-3 sm:px-4 py-1 rounded-full border-2 border-slate-900 shadow-xl tracking-widest whitespace-nowrap min-w-0 w-28 sm:w-32 text-center outline-none"
+                         aria-label="Your name"
+                     />
+                 ) : (
+-                    <button onClick={startEditName} title="Click to change your name" className="bg-blue-600 text-[9px] font-black px-4 py-1 rounded-full border-2 border-slate-900 shadow-xl tracking-widest whitespace-nowrap hover:bg-blue-500 transition-colors cursor-pointer">
++                    <button onClick={startEditName} title="Click to change your name" className="t-label bg-blue-600 font-black px-3 sm:px-4 py-1 rounded-full border-2 border-slate-900 shadow-xl tracking-widest whitespace-nowrap truncate min-w-0 hover:bg-blue-500 transition-colors cursor-pointer">
+                         {isSpectator ? '👁 ' : ''}{displayMyName}
+                     </button>
+                 )}
+-                <button onClick={onCopyIdClick} className={`flex items-center gap-1 px-3 py-1 rounded-full border text-[8px] font-mono transition-all ${copySuccess ? 'bg-green-900/40 border-green-500 text-green-300' : 'bg-slate-950 border-slate-800'}`}>
++                <button onClick={onCopyIdClick} className={`t-micro flex items-center gap-1 px-2 sm:px-3 py-1 rounded-full border font-mono whitespace-nowrap flex-shrink-0 transition-all ${copySuccess ? 'bg-green-900/40 border-green-500 text-green-300' : 'bg-slate-950 border-slate-800'}`}>
+                     {copySuccess ? 'Copied!' : `🔗 Share`}
+                 </button>
+                 {reconnecting && (
+-                    <div className="flex items-center gap-1.5 px-3 py-1 rounded-full border border-amber-500/40 bg-amber-500/10 animate-pulse" data-testid="reconnecting-indicator">
++                    <div className="flex items-center gap-1.5 px-2 sm:px-3 py-1 rounded-full border border-amber-500/40 bg-amber-500/10 animate-pulse flex-shrink-0" data-testid="reconnecting-indicator">
+                         <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+-                        <span className="text-[8px] font-black uppercase tracking-widest text-amber-300">Reconnecting…</span>
++                        <span className="t-micro font-black uppercase tracking-widest text-amber-300 hidden sm:inline">Reconnecting…</span>
+                     </div>
+                 )}
+             </div>
+ 
+-            <div className="flex justify-between items-center mb-1 px-2">
+-                <div className="text-center w-16 relative" data-testid="tavern-slot">
+-                    <div className="text-[7px] uppercase tracking-wider text-green-400 font-black">Tavern</div>
+-                    <div className="text-lg font-black leading-none">🍺 {gameState.tavern_deck.length}</div>
++            <div className="flex justify-between items-center mb-1 px-1 sm:px-2 gap-2">
++                <div className="text-center w-12 sm:w-16 relative flex-shrink-0" data-testid="tavern-slot">
++                    <div className="t-micro uppercase tracking-wider text-green-400 font-black">Tavern</div>
++                    <div className="t-body font-black leading-none whitespace-nowrap">🍺 {gameState.tavern_deck.length}</div>
+                     <AnimatePresence>
+                         {activeEffects.filter(e => e.type === 'heal').map(e => (
+-                            <motion.span key={e.id} initial={{ y: 0, opacity: 1 }} animate={{ y: -30, opacity: 0 }} exit={{ opacity: 0 }} className="absolute inset-x-0 -top-4 text-xs text-green-400 font-black">{e.value}</motion.span>
++                            <motion.span key={e.id} initial={{ y: 0, opacity: 1 }} animate={{ y: -30, opacity: 0 }} exit={{ opacity: 0 }} className="t-label absolute inset-x-0 -top-4 text-green-400 font-black">{e.value}</motion.span>
+                         ))}
+                     </AnimatePresence>
+                 </div>
+ 
+-                <div className="text-center flex-1 mx-4">
+-                    <div className="text-[7px] uppercase tracking-wider text-red-400 font-black mb-0.5">Tier</div>
+-                    <div className="flex justify-center gap-1.5 h-11">
+-                        {currentTierEnemies.map((c) => <Card key={c.id} card={c} className="w-8 h-11 border border-slate-600 shadow-lg" />)}
++                <div className="text-center flex-1 min-w-0">
++                    <div className="t-micro uppercase tracking-wider text-red-400 font-black mb-0.5">Tier</div>
++                    <div className="flex justify-center gap-1 sm:gap-1.5 items-end" style={{ minHeight: 'calc(var(--thumb-w) * 7 / 5)' }}>
++                        {currentTierEnemies.map((c) => <Card key={c.id} card={c} className="thumb-card border border-slate-600 shadow-lg" />)}
+                     </div>
+                 </div>
+ 
+-                <div className="text-center w-16 relative" data-testid="discard-slot">
+-                    <div className="text-[7px] uppercase tracking-wider text-slate-400 font-black">Discard</div>
+-                    <div className="text-xl font-black leading-none">🗑️ {gameState.discard_pile.length}</div>
++                <div className="text-center w-12 sm:w-16 relative flex-shrink-0" data-testid="discard-slot">
++                    <div className="t-micro uppercase tracking-wider text-slate-400 font-black">Discard</div>
++                    <div className="t-body font-black leading-none whitespace-nowrap">🗑️ {gameState.discard_pile.length}</div>
+                 </div>
+             </div>
+ 
+             {isSolo && gameState.solo_jesters > 0 && (
+                 <div className="flex justify-center gap-4 py-1 border-t border-slate-700/20">
+-                    {[...Array(2)].map((_, i) => (
+-                        <button key={i} disabled={!isMyTurn} onClick={onSoloJesterClick} className={`w-7 h-9 rounded border flex items-center justify-center text-sm transition-all ${i < gameState.solo_jesters ? `border-purple-500 bg-purple-900/40 shadow-lg ${mustRefreshSolo ? 'animate-bounce border-purple-400' : ''}` : 'border-slate-800 bg-slate-900 opacity-20 grayscale cursor-not-allowed'}`}>🃏</button>
+-                    ))}
++                    {[...Array(SOLO_JESTER_SLOTS)].map((_, i) => {
++                        const available = i < gameState.solo_jesters;
++                        return (
++                            <button
++                                key={i}
++                                // A spent Jester looked disabled but was still clickable.
++                                disabled={!isMyTurn || !available}
++                                onClick={onSoloJesterClick}
++                                aria-label={available ? 'Discard your hand and refill' : 'Jester already used'}
++                                className={`w-6 h-8 sm:w-7 sm:h-9 rounded border flex items-center justify-center t-body transition-all ${available ? `border-purple-500 bg-purple-900/40 shadow-lg ${mustRefreshSolo ? 'animate-bounce border-purple-400' : ''}` : 'border-slate-800 bg-slate-900 opacity-20 grayscale cursor-not-allowed'}`}
++                            >
++                                🃏
++                            </button>
++                        );
++                    })}
+                 </div>
+             )}
+ 
+-            <div className="flex gap-2 justify-center flex-wrap border-t border-slate-700/30 pt-1.5">
++            <div className="flex gap-1.5 sm:gap-2 justify-center flex-wrap border-t border-slate-700/30 pt-1.5">
+                 {gameState.players.map((p, i) => {
+                     const displayName = p.name || `P${i + 1}`;
++                    // Diamonds draw starts with the current player, so that's
++                    // where the +N floats. (This used to compute the current
++                    // index the long way round and compare it to itself.)
++                    const isDrawer = gameState.current_player_index === i;
+                     return (
+-                        <div key={i} className={`px-2 py-0.5 rounded-full text-[8px] font-black border transition-all flex items-center gap-1 relative ${gameState.current_player_index === i ? 'bg-blue-600 border-blue-400 shadow-lg scale-105' : 'bg-slate-900/50 border-slate-700 opacity-50'}`}>
+-                            {myPlayerId === i && <span className="w-1 h-1 bg-green-400 rounded-full animate-pulse"></span>} {displayName}: {p.hand.length}
++                        <div key={i} className={`t-micro px-2 py-0.5 rounded-full font-black border transition-all flex items-center gap-1 relative max-w-[8rem] ${gameState.current_player_index === i ? 'bg-blue-600 border-blue-400 shadow-lg scale-105' : 'bg-slate-900/50 border-slate-700 opacity-50'}`}>
++                            {myPlayerId === i && <span className="w-1 h-1 bg-green-400 rounded-full animate-pulse flex-shrink-0"></span>}
++                            <span className="truncate">{displayName}</span>: {p.hand.length}
+                             <AnimatePresence>
+-                                {activeEffects.filter(e => e.type === 'draw' && (gameState.current_player_index + gameState.players.length) % gameState.players.length === i).map(e => (
+-                                    <motion.span key={e.id} initial={{ y: 0, opacity: 1 }} animate={{ y: -20, opacity: 0 }} exit={{ opacity: 0 }} className="absolute inset-x-0 -top-4 text-[10px] text-blue-400 font-black text-center">{e.value}</motion.span>
++                                {isDrawer && activeEffects.filter(e => e.type === 'draw').map(e => (
++                                    <motion.span key={e.id} initial={{ y: 0, opacity: 1 }} animate={{ y: -20, opacity: 0 }} exit={{ opacity: 0 }} className="t-label absolute inset-x-0 -top-4 text-blue-400 font-black text-center">{e.value}</motion.span>
+                                 ))}
+                             </AnimatePresence>
+                         </div>
+diff --git a/frontend/src/components/HandArea.tsx b/frontend/src/components/HandArea.tsx
+index 0caac19..252ddf0 100644
+--- a/frontend/src/components/HandArea.tsx
++++ b/frontend/src/components/HandArea.tsx
+@@ -18,61 +18,75 @@ interface HandAreaProps {
+     actualHand: CardType[];
+     currentPlayerIndex: number;
+     discardRemaining: number;
++    playerNames: string[];
+ }
+ 
+-const HandArea: React.FC<HandAreaProps> = ({ 
+-    sortedHand, maxHandSize, isMyTurn, selectedIndices, 
++const HandArea: React.FC<HandAreaProps> = ({
++    sortedHand, maxHandSize, isMyTurn, selectedIndices,
+     damageNeeded, currentDiscardValue, phase, enemySuit, isJesterActive,
+-    onCardClick, actualHand, currentPlayerIndex, discardRemaining
++    onCardClick, actualHand, currentPlayerIndex, discardRemaining, playerNames
+ }) => {
+     const currentSelection = selectedIndices.map(idx => actualHand[idx]).filter(Boolean) as CardType[];
+     const isDiscarding = damageNeeded > 0;
+     const isChoosing = phase === 'AwaitingNextPlayer';
+     const canInteract = isMyTurn && !isChoosing;
+ 
++    // The hand can briefly hold more than the limit is not possible, but a
++    // stale/short max_hand_size must never clip real cards off the row.
++    const slotCount = Math.max(maxHandSize, sortedHand.length, 1);
++    const waitingOn = playerNames[currentPlayerIndex] || `P${currentPlayerIndex + 1}`;
++
++    const statusText = isChoosing
++        ? (isMyTurn ? 'CHOOSE NEXT PLAYER' : 'JESTER CHOOSING…')
++        : isDiscarding
++            ? (isMyTurn ? `DISCARD ${discardRemaining} REMAINING` : `${waitingOn} DISCARDING…`)
++            : (isMyTurn ? 'YOUR TURN' : `WAITING FOR ${waitingOn}…`);
++
+     return (
+-        <div data-testid="hand-area" className="flex flex-col items-center relative px-4 pb-2">
++        <div data-testid="hand-area" className="flex flex-col items-center relative px-2 sm:px-4 pb-1.5">
+             {/* Status Indicator Above Hand */}
+-            <div className="flex items-center justify-center h-10 mb-2">
+-                <div className={`px-10 py-1.5 rounded-full font-black border shadow-xl text-[10px] transition-all duration-300 ${isChoosing ? 'bg-purple-600 border-purple-400 text-white' : isDiscarding ? 'bg-red-600 border-red-400 text-white animate-pulse' : isMyTurn ? 'bg-blue-600 border-blue-400 text-white shadow-lg' : 'bg-slate-800 border-slate-700 text-slate-500 opacity-60'}`}>
+-                    {isChoosing ? (isMyTurn ? "CHOOSE NEXT PLAYER" : "JESTER CHOOSING...") : isDiscarding ? (isMyTurn ? `DISCARD ${discardRemaining} REMAINING` : `P${currentPlayerIndex + 1} DISCARDING...`) : (isMyTurn ? "YOUR TURN" : `WAITING FOR P${currentPlayerIndex + 1}...`)}
++            <div className="flex items-center justify-center py-1.5 sm:py-2">
++                <div className={`t-label px-4 sm:px-10 py-1 sm:py-1.5 rounded-full font-black border shadow-xl text-center max-w-full truncate transition-all duration-300 ${isChoosing ? 'bg-purple-600 border-purple-400 text-white' : isDiscarding ? 'bg-red-600 border-red-400 text-white animate-pulse' : isMyTurn ? 'bg-blue-600 border-blue-400 text-white shadow-lg' : 'bg-slate-800 border-slate-700 text-slate-500 opacity-60'}`}>
++                    {statusText}
+                 </div>
+             </div>
+ 
+-            <div className="flex flex-row justify-center gap-2 lg:gap-4 max-w-full overflow-visible h-32 lg:h-44 items-end">
++            {/* Slots are flex-basis:0 so 5 and 8 card hands both fit the width,
++                and each is capped at the width implied by the row height. */}
++            <div className="hand-row max-w-5xl">
+                 <AnimatePresence mode="popLayout" initial={false}>
+-                    {[...Array(maxHandSize)].map((_, i) => {
++                    {[...Array(slotCount)].map((_, i) => {
+                         const item = sortedHand[i];
+                         if (item) {
+                             const isSel = selectedIndices.includes(item.originalIndex);
+                             const isImmune = enemySuit === item.card.suit && !isJesterActive;
+                             const showWarning = isImmune && isSel && !isDiscarding;
+-                            
++
+                             const shouldGrey = canInteract && !isSel && (
+-                                !isSelectionValid(item.card, currentSelection, phase) || 
++                                !isSelectionValid(item.card, currentSelection, phase) ||
+                                 (damageNeeded > 0 && currentDiscardValue >= damageNeeded)
+                             );
+ 
+                             return (
+-                                <motion.div 
+-                                    key={item.card.id} 
++                                <motion.div
++                                    key={item.card.id}
+                                     layoutId={`hand-slot-${item.card.id}`}
+-                                    initial={{ y: -350, x: -120, opacity: 0, scale: 0.7 }} 
+-                                    animate={{ y: 0, x: 0, opacity: 1, scale: 1 }} 
++                                    initial={{ y: -350, x: -120, opacity: 0, scale: 0.7 }}
++                                    animate={{ y: 0, x: 0, opacity: 1, scale: 1 }}
+                                     exit={{ y: 100, opacity: 0, scale: 0.8 }}
+                                     transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+-                                    className="relative flex-shrink-0 h-full flex items-end"
++                                    className="hand-slot relative"
+                                 >
+-                                    <Card 
+-                                        card={item.card} 
+-                                        selected={isSel} 
+-                                        onClick={canInteract ? () => onCardClick(item.originalIndex) : undefined} 
+-                                        className={`w-[11vw] max-w-[95px] transition-all duration-300 ${!canInteract ? 'opacity-40 grayscale-[0.4] pointer-events-none' : ''} ${shouldGrey ? 'opacity-10 grayscale brightness-[0.2]' : ''}`} 
++                                    <Card
++                                        card={item.card}
++                                        selected={isSel}
++                                        onClick={canInteract ? () => onCardClick(item.originalIndex) : undefined}
++                                        className={`hand-card transition-all duration-300 ${!canInteract ? 'opacity-40 grayscale-[0.4] pointer-events-none' : ''} ${shouldGrey ? 'opacity-10 grayscale brightness-[0.2]' : ''}`}
+                                     />
+                                     {showWarning && (
+-                                        <motion.div 
++                                        <motion.div
+                                             initial={{ scale: 0 }} animate={{ scale: 1 }}
+-                                            className="absolute -top-3 -right-3 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center text-sm font-black border-2 border-white z-[110] shadow-xl"
++                                            className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full w-5 h-5 sm:w-6 sm:h-6 flex items-center justify-center t-body font-black border-2 border-white z-[110] shadow-xl"
+                                         >
+                                             !
+                                         </motion.div>
+@@ -80,8 +94,8 @@ const HandArea: React.FC<HandAreaProps> = ({
+                                 </motion.div>
+                             );
+                         } else return (
+-                            <motion.div key={`empty-${i}`} layout className="flex-shrink-0 h-full flex items-end">
+-                                <Card isEmpty className="w-[11vw] max-w-[95px]" />
++                            <motion.div key={`empty-${i}`} layout className="hand-slot">
++                                <Card isEmpty className="hand-card rounded-md" />
+                             </motion.div>
+                         );
+                     })}
+diff --git a/frontend/src/hooks/useGameLogic.ts b/frontend/src/hooks/useGameLogic.ts
+index 7c98adc..ddf0fdd 100644
+--- a/frontend/src/hooks/useGameLogic.ts
++++ b/frontend/src/hooks/useGameLogic.ts
+@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+ import type { GameState, GameAction, Card as CardType, CombatEffect, RoomSnapshot, RoomMember } from '../types';
+ import { getAttackValue, getRankValue, isSelectionValid, calculateBlowDamage, suitOrder } from '../gameLogic';
+ import { decideBufferedActionsToReplay } from '../reconnectLogic';
+-import { playBellChime } from '../sound';
++import { installAudioUnlock, isMuted, playBellChime, setMuted } from '../sound';
++import { shouldRingTurnChime } from '../turnChime';
+ 
+ const BASE_TITLE = 'Regicide';
+ const YOUR_TURN_TITLE = 'Your Turn! - Regicide';
+@@ -23,6 +24,17 @@ export interface FlightBox {
+     height: number;
+ }
+ 
++/**
++ * A seat restored from localStorage may be garbage (hand-edited, or left over
++ * from a bigger table that has since been reset), and `players[NaN]` blows up
++ * the whole board. Only ever adopt a seat that parses to a real index.
++ */
++const parseSeat = (raw: string | null): number | null => {
++  if (raw === null) return null;
++  const seat = Number.parseInt(raw, 10);
++  return Number.isInteger(seat) && seat >= 0 ? seat : null;
++};
++
+ export interface DefeatFlight {
+     id: number; // uniquely identifies this defeat
+     card: CardType;
+@@ -52,6 +64,7 @@ export const useGameLogic = () => {
+   const backoffRef = useRef(500);
+   const lastGameStateJsonRef = useRef<string | null>(null);
+   const [reconnecting, setReconnecting] = useState(false);
++  const [muted, setMutedState] = useState<boolean>(() => isMuted());
+   // Games whose join request is currently in flight. Joining claims a seat on
+   // the server, so a duplicate (React StrictMode double-invokes the URL-join
+   // effect, and a user can press Enter twice) must never fire two join calls.
+@@ -59,6 +72,13 @@ export const useGameLogic = () => {
+   // Detects the transition into "my turn" so the chime only rings when the
+   // turn actually arrives, not on the initial load (e.g. you created the game).
+   const wasMyTurnRef = useRef<boolean | null>(null);
++  // Pending activeEffects expiry timers, so they don't fire after unmount.
++  const effectTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
++
++  useEffect(() => () => {
++    effectTimersRef.current.forEach(clearTimeout);
++    effectTimersRef.current = [];
++  }, []);
+ 
+   const isMyTurn = localGameState?.current_player_index === myPlayerId;
+   const isSolo = localGameState?.players.length === 1;
+@@ -66,16 +86,18 @@ export const useGameLogic = () => {
+   // A member seated beyond the active game's player count watches the game.
+   const isSpectator = localGameState !== null && myPlayerId !== null && myPlayerId >= localGameState.players.length;
+ 
+-  // Ring the bell only when a turn actually arrives mid-game. Solo play is
+-  // excluded: the turn returns to you after every action, so each return would
+-  // just be noise. prev === null (first state evaluation) is also skipped so
+-  // joining/resuming into a game where it's already our turn stays silent.
++  // Audio can only be started from a user gesture, and the chime fires from a
++  // state update — never a gesture. Arm the context on the first interaction
++  // with the page so the chime can actually sound later.
++  useEffect(() => installAudioUnlock(), []);
++
++  // Ring the bell when the turn arrives, so the next player knows they're up
++  // without watching the screen. See `shouldRingTurnChime` for the rule.
+   useEffect(() => {
+-    if (isSolo || !localGameState || myPlayerId === null) return;
++    if (!localGameState || myPlayerId === null) return;
+     const prev = wasMyTurnRef.current;
+     wasMyTurnRef.current = isMyTurn;
+-    if (prev === null || prev === isMyTurn) return;
+-    if (isMyTurn) playBellChime();
++    if (shouldRingTurnChime(prev, isMyTurn, isSolo)) playBellChime();
+   }, [localGameState, myPlayerId, isMyTurn, isSolo]);
+ 
+   // Flash the tab title while it's our turn and the tab is unfocused, so a
+@@ -150,7 +172,11 @@ export const useGameLogic = () => {
+         }
+         if (effects.length > 0) {
+             setActiveEffects(prevEffects => [...prevEffects, ...effects]);
+-            setTimeout(() => setActiveEffects(prevEffects => prevEffects.filter(e => !effects.find(ne => ne.id === e.id))), 1200);
++            const timer = setTimeout(() => {
++                setActiveEffects(prevEffects => prevEffects.filter(e => !effects.find(ne => ne.id === e.id)));
++                effectTimersRef.current = effectTimersRef.current.filter(t => t !== timer);
++            }, 1200);
++            effectTimersRef.current.push(timer);
+         }
+     }
+     
+@@ -215,10 +241,24 @@ export const useGameLogic = () => {
+   // consumes one seat.
+   useEffect(() => {
+     if (!gameId || myPlayerId !== null) return;
+-    const savedSeat = localStorage.getItem(`seat_${gameId}`);
+-    if (savedSeat !== null) setMyPlayerId(parseInt(savedSeat));
++    const savedSeat = parseSeat(localStorage.getItem(`seat_${gameId}`));
++    if (savedSeat !== null) setMyPlayerId(savedSeat);
+   }, [gameId, myPlayerId]);
+ 
++  // connectWebSocket and scheduleReconnect call each other. Routing the back
++  // edge through a ref lets scheduleReconnect be declared first, so it is no
++  // longer used before it is declared — which previously only worked because
++  // `onclose` happens to fire asynchronously, well after the declaration ran.
++  const connectRef = useRef<() => void>(() => {});
++
++  const scheduleReconnect = useCallback(() => {
++    if (intentionalCloseRef.current) return;
++    reconnectTimerRef.current = setTimeout(() => {
++      reconnectTimerRef.current = null;
++      connectRef.current();
++    }, backoffRef.current);
++  }, []);
++
+   const connectWebSocket = useCallback(() => {
+     const id = gameId;
+     if (!id || intentionalCloseRef.current) return;
+@@ -252,12 +292,22 @@ export const useGameLogic = () => {
+       setRoster(payload.members);
+     };
+     socket.onmessage = (event) => {
+-      const msg = JSON.parse(event.data);
+-      if (msg && msg.type === 'State') {
+-        onState(msg.payload);
++      // A malformed frame must not take the handler (and the socket) down.
++      let msg: unknown;
++      try {
++        msg = JSON.parse(event.data);
++      } catch {
++        return;
++      }
++      if (msg && typeof msg === 'object' && (msg as { type?: string }).type === 'State') {
++        onState((msg as { payload: RoomSnapshot }).payload);
+         return;
+       }
+-      setGameState(msg);
++      // Untagged frame: only accept it if it actually looks like a snapshot,
++      // rather than casting whatever arrived straight into state.
++      if (msg && typeof msg === 'object' && 'game' in msg && 'members' in msg) {
++        onState(msg as RoomSnapshot);
++      }
+     };
+     socket.onclose = () => {
+       if (intentionalCloseRef.current) return;
+@@ -268,15 +318,11 @@ export const useGameLogic = () => {
+       backoffRef.current = Math.min(backoffRef.current * 1.5, 8000);
+       scheduleReconnect();
+     };
+-  }, [gameId]);
++  }, [gameId, scheduleReconnect]);
+ 
+-  const scheduleReconnect = () => {
+-    if (intentionalCloseRef.current) return;
+-    reconnectTimerRef.current = setTimeout(() => {
+-      reconnectTimerRef.current = null;
+-      connectWebSocket();
+-    }, backoffRef.current);
+-  };
++  useEffect(() => {
++    connectRef.current = connectWebSocket;
++  }, [connectWebSocket]);
+ 
+   useEffect(() => {
+     if (gameId) {
+@@ -285,6 +331,7 @@ export const useGameLogic = () => {
+       bufferedActionsRef.current = [];
+       backoffRef.current = 500;
+       lastGameStateJsonRef.current = null;
++      wasMyTurnRef.current = null;
+       connectWebSocket();
+     }
+     return () => {
+@@ -343,19 +390,35 @@ export const useGameLogic = () => {
+ 
+   const damageNeeded = useMemo(() => {
+     if (typeof localGameState?.phase === 'object' && 'AwaitingDiscard' in localGameState.phase) {
+-        return (localGameState.phase as any).AwaitingDiscard.damage_to_take;
++        return localGameState.phase.AwaitingDiscard.damage_to_take;
+     }
+     return 0;
+   }, [localGameState]);
+ 
+   const discardRemaining = Math.max(0, damageNeeded - currentDiscardValue);
+ 
++  // A seat that no longer exists on this table (e.g. a 4-player game was reset
++  // to 2) must not be used to index into `players`.
++  const seatedPlayer = (myPlayerId !== null && localGameState?.players[myPlayerId]) || null;
++
++  /**
++   * Rules: a player may not yield once every *other* player has yielded on
++   * their last turn. The server enforces it too, but it rejects silently, so
++   * the button has to know.
++   */
++  const canYield = useMemo(() => {
++    if (!localGameState) return false;
++    const playerCount = localGameState.players.length;
++    if (playerCount <= 1) return false;
++    return (localGameState.consecutive_yields ?? 0) + 1 < playerCount;
++  }, [localGameState]);
++
+   const isImmuneWarning = useMemo(() => {
+     if (!localGameState?.active_enemy || selectedIndices.length === 0) return false;
+     const enemySuit = localGameState.active_enemy.card.suit;
+     if (!enemySuit || localGameState.active_enemy.is_jester_active) return false;
+-    return selectedIndices.some(idx => localGameState.players[myPlayerId!].hand[idx]?.suit === enemySuit);
+-  }, [selectedIndices, localGameState, myPlayerId]);
++    return selectedIndices.some(idx => seatedPlayer?.hand[idx]?.suit === enemySuit);
++  }, [selectedIndices, localGameState, seatedPlayer]);
+ 
+   const createGame = async (numPlayers: number) => {
+     const playerName = localStorage.getItem('regicide_player_name') || '';
+@@ -364,6 +427,12 @@ export const useGameLogic = () => {
+       headers: { 'Content-Type': 'application/json' },
+       body: JSON.stringify({ num_players: numPlayers, player_name: playerName || undefined }),
+     });
++    if (!res.ok) {
++      // Without this the app set gameId to undefined and bounced back to the
++      // menu with no explanation.
++      alert('Could not start a game. Please try again.');
++      return;
++    }
+     const data = await res.json();
+     setGameId(data.id); setGameState(data.state.game); setRoster(data.state.members); setMyPlayerId(0);
+     localStorage.setItem(`seat_${data.id}`, "0");
+@@ -401,12 +470,12 @@ export const useGameLogic = () => {
+       const snap = await res.json() as RoomSnapshot;
+ 
+       // A seat from an earlier session (resume case) skips the join call.
+-      const savedSeat = localStorage.getItem(`seat_${id}`);
++      const savedSeat = parseSeat(localStorage.getItem(`seat_${id}`));
+       if (savedSeat !== null) {
+         setGameId(id);
+         setGameState(snap.game);
+         setRoster(snap.members);
+-        setMyPlayerId(parseInt(savedSeat));
++        setMyPlayerId(savedSeat);
+         setUrlGameId(id);
+         return;
+       }
+@@ -460,6 +529,16 @@ export const useGameLogic = () => {
+     if (myPlayerId !== null) sendAction({ type: 'SetName', payload: { seat: myPlayerId, name: trimmed } });
+   };
+ 
++  const toggleMute = useCallback(() => {
++    const next = !isMuted();
++    setMuted(next);
++    setMutedState(next);
++    // Unmuting happens inside a click, which is a real user gesture: ring once
++    // so the player hears the level and the audio context is armed at the same
++    // moment, rather than on some later turn change.
++    if (!next) playBellChime();
++  }, []);
++
+   const chooseNextPlayer = (index: number) => {
+     sendAction({ type: 'ChooseNextPlayer', payload: { index } });
+   };
+@@ -512,7 +591,7 @@ export const useGameLogic = () => {
+ 
+   return {
+     gameId, myPlayerId, roster, localGameState, selectedIndices, copySuccess, showGameOver, setShowGameOver, activeEffects,
+-    defeatFlight, finishDefeatFlight, reconnecting,
++    defeatFlight, finishDefeatFlight, reconnecting, seatedPlayer, canYield, muted, toggleMute,
+     sortedHand, currentTierEnemies, currentDiscardValue, damageNeeded, isMyTurn, isSolo, isSpectator, discardRemaining, isImmuneWarning,
+     isChoosingNextPlayer,
+     createGame, joinGame, sendAction, toggleCard, chooseNextPlayer, copyId, exitToMenu, restartTable, startNewGame, renamePlayer
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+index 9c28570..0374006 100644
+--- a/frontend/src/index.css
++++ b/frontend/src/index.css
+@@ -10,6 +10,37 @@ button:not(:disabled) {
+   --text: #e2e8f0; /* slate-200 */
+   --text-h: #ffffff;
+   --bg: #0f172a; /* slate-900 */
++
++  /* ---------------------------------------------------------------------
++     Scaling tokens.
++
++     The board is a fixed-height three-row grid, so the thing that actually
++     runs out is vertical space, not width. Every card size below is therefore
++     derived from a height budget (dvh, which excludes mobile browser chrome)
++     and clamped at both ends: small enough for a 640px-tall landscape phone,
++     large enough that a 1440p desktop doesn't render postage stamps.
++     --------------------------------------------------------------------- */
++
++  /* Height of the hand row. Card width follows from it via the 5:7 ratio. */
++  --hand-h: clamp(4.75rem, 16dvh, 10.5rem);
++  --hand-gap: clamp(0.25rem, 1.1vw, 0.9rem);
++  /* Width budget for one hand card, so a card is never taller than the row. */
++  --hand-card-max-w: calc(var(--hand-h) * 5 / 7);
++
++  /* Thumbnails (castle tier strip, last play). */
++  --thumb-w: clamp(1.6rem, 4.4vw, 3.1rem);
++
++  /* Fluid type ramp. */
++  --t-micro: clamp(0.5rem, 0.42rem + 0.32vw, 0.75rem);
++  --t-label: clamp(0.5625rem, 0.47rem + 0.42vw, 0.9rem);
++  --t-body: clamp(0.75rem, 0.66rem + 0.42vw, 1.05rem);
++  --t-stat: clamp(1.05rem, 0.8rem + 1.15vw, 2.1rem);
++
++  /* Notch / home-indicator insets, 0 on everything that doesn't have them. */
++  --safe-t: env(safe-area-inset-top, 0px);
++  --safe-b: env(safe-area-inset-bottom, 0px);
++  --safe-l: env(safe-area-inset-left, 0px);
++  --safe-r: env(safe-area-inset-right, 0px);
+ }
+ 
+ body {
+@@ -17,8 +48,74 @@ body {
+   background-color: var(--bg);
+   color: var(--text);
+   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
++  /* The board owns the viewport; nothing should rubber-band behind it. */
++  overscroll-behavior: none;
+ }
+ 
+ #root {
+-  min-height: 100vh;
++  min-height: 100vh; /* fallback for browsers without dvh */
++  min-height: 100dvh;
++}
++
++/* Type ramp utilities. Plain CSS rather than arbitrary Tailwind values so one
++   edit rescales every label in the app. */
++.t-micro { font-size: var(--t-micro); }
++.t-label { font-size: var(--t-label); }
++.t-body  { font-size: var(--t-body); }
++.t-stat  { font-size: var(--t-stat); }
++
++/* ---- Board shell ------------------------------------------------------- */
++
++/* dvh tracks the visible viewport as mobile browser chrome collapses, so the
++   footer no longer hides under the URL bar. */
++.board-shell {
++  height: 100vh;
++  height: 100dvh;
++  padding-top: var(--safe-t);
++  padding-left: var(--safe-l);
++  padding-right: var(--safe-r);
++}
++
++/* The footer is the last thing above the home indicator. */
++.board-footer {
++  padding-bottom: calc(var(--safe-b) + 0.5rem);
++}
++
++/* ---- Hand row ---------------------------------------------------------- */
++
++/* Slots share the row equally (flex-basis 0), so a 5-card and an 8-card hand
++   both fill the width without overflowing, and each slot is capped at the
++   width implied by the row height so a card never outgrows its row. */
++.hand-row {
++  display: flex;
++  align-items: flex-end;
++  justify-content: center;
++  gap: var(--hand-gap);
++  width: 100%;
++  height: var(--hand-h);
++}
++
++.hand-slot {
++  flex: 1 1 0;
++  min-width: 0;
++  max-width: var(--hand-card-max-w);
++  height: 100%;
++  display: flex;
++  align-items: flex-end;
++}
++
++/* Width-driven: height follows from aspect-ratio, so it can never exceed the
++   row height given the max-width cap above. */
++.hand-card {
++  width: 100%;
++}
++
++.thumb-card {
++  width: var(--thumb-w);
++}
++
++/* A solo hand is 8 cards wide. On a narrow phone the gaps are what's expensive,
++   so give the width back to the cards. */
++@media (max-width: 400px) {
++  :root { --hand-gap: 0.125rem; }
+ }
+diff --git a/frontend/src/sound.ts b/frontend/src/sound.ts
+index ee71de5..bb12a59 100644
+--- a/frontend/src/sound.ts
++++ b/frontend/src/sound.ts
+@@ -1,18 +1,81 @@
+ // Synthesizes a short bell chime with the Web Audio API so no audio asset has
+-// to be bundled. The context is created lazily (browsers suspend it until the
+-// first user gesture, so the first chime after an interaction just resumes it).
++// to be bundled.
++//
++// Browsers only let audio start from a user gesture. Two consequences drive the
++// shape of this module:
++//
++//  1. A context created outside a gesture starts `suspended`, and on iOS it
++//     stays that way however many times `resume()` is called later. So the
++//     context is created during the first real interaction with the page
++//     (`installAudioUnlock`), not on the first chime — the turn chime is rung
++//     from a state update, which is never a gesture.
++//  2. A suspended context has a frozen clock. Scheduling an envelope against
++//     `currentTime` while suspended puts the whole thing in the past by the
++//     time playback resumes, so the chime is silently swallowed. Playback
++//     therefore resumes first and only schedules once the context is running.
+ let context: AudioContext | null = null;
+ 
++const MUTE_KEY = 'regicide_muted';
++
++// localStorage throws in some private-browsing modes, so every access is
++// guarded and simply falls back to "not muted".
++const readMuted = (): boolean => {
++    try {
++        return localStorage.getItem(MUTE_KEY) === '1';
++    } catch {
++        return false;
++    }
++};
++
++let muted = readMuted();
++
++export const isMuted = (): boolean => muted;
++
++export const setMuted = (value: boolean): void => {
++    muted = value;
++    try {
++        localStorage.setItem(MUTE_KEY, value ? '1' : '0');
++    } catch { /* not persisted this session */ }
++};
++
+ const getContext = (): AudioContext | null => {
+     if (typeof window === 'undefined' || !('AudioContext' in window)) return null;
+-    if (!context) context = new AudioContext();
+-    if (context.state === 'suspended') void context.resume();
++    if (!context) {
++        try {
++            context = new AudioContext();
++        } catch {
++            return null;
++        }
++    }
+     return context;
+ };
+ 
+-export const playBellChime = () => {
+-    const ac = getContext();
+-    if (!ac) return;
++const UNLOCK_EVENTS = ['pointerdown', 'keydown', 'touchend'] as const;
++
++/**
++ * Arms audio on the first interaction with the page, so later chimes (which
++ * fire from state updates) actually sound. Returns a teardown function.
++ */
++export const installAudioUnlock = (): (() => void) => {
++    if (typeof window === 'undefined') return () => {};
++
++    const teardown = () => {
++        for (const event of UNLOCK_EVENTS) window.removeEventListener(event, unlock);
++    };
++
++    const unlock = () => {
++        teardown();
++        const ac = getContext();
++        if (ac && ac.state !== 'running') void ac.resume().catch(() => {});
++    };
++
++    for (const event of UNLOCK_EVENTS) {
++        window.addEventListener(event, unlock, { passive: true });
++    }
++    return teardown;
++};
++
++const ring = (ac: AudioContext) => {
+     const now = ac.currentTime;
+ 
+     const master = ac.createGain();
+@@ -45,4 +108,18 @@ export const playBellChime = () => {
+         osc.start(now);
+         osc.stop(now + p.decay + 0.05);
+     }
+-};
+\ No newline at end of file
++};
++
++export const playBellChime = () => {
++    if (muted) return;
++    const ac = getContext();
++    if (!ac) return;
++    if (ac.state === 'running') {
++        ring(ac);
++        return;
++    }
++    // Resume before scheduling, or the envelope lands entirely in the past.
++    void ac.resume().then(() => {
++        if (ac.state === 'running') ring(ac);
++    }).catch(() => {});
++};
+diff --git a/frontend/src/turnChime.ts b/frontend/src/turnChime.ts
+new file mode 100644
+index 0000000..b14f9e0
+--- /dev/null
++++ b/frontend/src/turnChime.ts
+@@ -0,0 +1,26 @@
++/**
++ * Decides whether a newly-arrived state should ring the "you're up" chime.
++ *
++ * Pulled out of the hook so the rule is testable without a browser or an
++ * AudioContext, the same way `reconnectLogic` is.
++ *
++ * @param previousWasMyTurn whether it was our turn in the last state we saw,
++ *   or `null` if this is the first state of the session.
++ * @param isMyTurn whether it is our turn in the state that just arrived.
++ * @param isSolo whether this is a single-player table.
++ */
++export function shouldRingTurnChime(
++    previousWasMyTurn: boolean | null,
++    isMyTurn: boolean,
++    isSolo: boolean,
++): boolean {
++    // Solo play hands the turn straight back after every action, so a chime
++    // each time would be constant noise rather than a signal.
++    if (isSolo) return false;
++    // First state of the session: joining or resuming into a game where it is
++    // already our turn should stay silent.
++    if (previousWasMyTurn === null) return false;
++    // Only the transition matters, not every state update.
++    if (previousWasMyTurn === isMyTurn) return false;
++    return isMyTurn;
++}
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+index c176fe7..5b29ee0 100644
+--- a/frontend/src/types.ts
++++ b/frontend/src/types.ts
+@@ -85,6 +85,9 @@ export interface GameState {
+     solo_jesters: number;
+     max_hand_size: number;
+     last_enemy_fate: EnemyFate | null;
++    /** Yields taken in a row since the last card was played. Optional so a
++     *  snapshot written by an older server still type-checks. */
++    consecutive_yields?: number;
+ }
+ 
+ export type GameAction = 
+diff --git a/frontend/unit/turnChime.test.ts b/frontend/unit/turnChime.test.ts
+new file mode 100644
+index 0000000..c7bd3b0
+--- /dev/null
++++ b/frontend/unit/turnChime.test.ts
+@@ -0,0 +1,27 @@
++import { describe, it, expect } from 'vitest';
++import { shouldRingTurnChime } from '../src/turnChime';
++
++describe('shouldRingTurnChime', () => {
++    it('rings when the turn arrives', () => {
++        expect(shouldRingTurnChime(false, true, false)).toBe(true);
++    });
++
++    it('stays silent when the turn is handed away', () => {
++        expect(shouldRingTurnChime(true, false, false)).toBe(false);
++    });
++
++    it('stays silent while nothing changes', () => {
++        expect(shouldRingTurnChime(true, true, false)).toBe(false);
++        expect(shouldRingTurnChime(false, false, false)).toBe(false);
++    });
++
++    it('stays silent on the first state, even if it is already our turn', () => {
++        // Joining, resuming, or reconnecting into our own turn.
++        expect(shouldRingTurnChime(null, true, false)).toBe(false);
++    });
++
++    it('never rings in solo play', () => {
++        // The turn comes back after every action, so this would be constant.
++        expect(shouldRingTurnChime(false, true, true)).toBe(false);
++    });
++});
+-- 
+2.43.0
+

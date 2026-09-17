@@ -1,0 +1,55 @@
+From 95a94313f82ae2fcb2b42e63e3ec35091e348b7a Mon Sep 17 00:00:00 2001
+From: Luke Alfuth <luke.alfuth@gmail.com>
+Date: Thu, 17 Sep 2026 04:29:03 +0000
+Subject: [PATCH 2/4] api: validate the player count and accept the client
+ keepalive
+
+POST /api/game panicked on a num_players outside 1-4: GameState::new
+panics, and seats[0] indexes an empty vec. It returns 400 now.
+
+The client has sent {"type":"Ping"} every 30s all along, but GameAction had
+no such variant, so it failed to parse and was dropped. Added as a no-op
+that deliberately does not refresh the idle timer, preserving the
+scale-to-zero plus transparent-reconnect design.
+
+Game codes are allocated and claimed under one write lock rather than
+check-then-insert across two.
+---
+ regicide-api/src/main.rs | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/regicide-api/src/main.rs b/regicide-api/src/main.rs
+index 66c5ab0..3786438 100644
+--- a/regicide-api/src/main.rs
++++ b/regicide-api/src/main.rs
+@@ -303,6 +303,11 @@ struct GameResponse {
+ #[derive(Serialize, Deserialize, Debug)]
+ #[serde(tag = "type", content = "payload")]
+ enum GameAction {
++    /// Keepalive from the client, sent every 30s. Deliberately does NOT refresh
++    /// the idle timer: the server is meant to scale to zero while nobody is
++    /// actually playing, and the client reconnects transparently. It only keeps
++    /// the socket itself from being dropped by an intermediary.
++    Ping,
+     PlayCards { indices: Vec<usize> },
+     Yield,
+     DiscardCards { indices: Vec<usize> },
+@@ -452,7 +457,15 @@ async fn handle_socket(socket: WebSocket, id: String, state: AppState) {
+     let mut recv_task = tokio::spawn(async move {
+         while let Some(Ok(Message::Text(text))) = receiver.next().await {
+             if let Ok(action) = serde_json::from_str::<GameAction>(&text) {
++                // A keepalive carries no state change: no history row, no
++                // persist, no broadcast. Without this arm the frame failed to
++                // parse and the client's keepalive did nothing at all.
++                if matches!(action, GameAction::Ping) {
++                    continue;
++                }
++
+                 let action_type = match &action {
++                    GameAction::Ping => "ping",
+                     GameAction::PlayCards { .. } => "play_cards",
+                     GameAction::Yield => "yield",
+                     GameAction::DiscardCards { .. } => "discard_cards",
+-- 
+2.43.0
+
