@@ -91,7 +91,6 @@ export const useGameLogic = () => {
 
   const isMyTurn = localGameState?.current_player_index === myPlayerId;
   const isSolo = localGameState?.players.length === 1;
-  const isChoosingNextPlayer = localGameState?.phase === 'AwaitingNextPlayer';
   // A member seated beyond the active game's player count watches the game.
   const isSpectator = localGameState !== null && myPlayerId !== null && myPlayerId >= localGameState.players.length;
 
@@ -554,6 +553,11 @@ export const useGameLogic = () => {
   const gameIdRef = useRef<string | null>(null);
   useEffect(() => { gameIdRef.current = gameId; }, [gameId]);
 
+  /** Actions that leave the board alone, so they must not discard a selection
+   *  the player is still building. Sending a chat message or renaming yourself
+   *  used to silently clear the cards you had just picked out. */
+  const KEEPS_SELECTION: GameAction['type'][] = ['SendChat', 'SetName'];
+
   const sendAction = (action: GameAction) => {
     if (ws.current?.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify(action));
@@ -562,7 +566,7 @@ export const useGameLogic = () => {
       // arrives; the onState handler replays the buffer if nothing moved.
       bufferedActionsRef.current.push(action);
     }
-    setSelectedIndices([]);
+    if (!KEEPS_SELECTION.includes(action.type)) setSelectedIndices([]);
   };
 
   // Persist the player's name locally AND broadcast it to the table, so
@@ -663,7 +667,6 @@ export const useGameLogic = () => {
     unreadChat: unreadCount(chat, chatSeenAt),
     markChatRead: () => setChatSeenAt(newestSeen(chat, chatSeenAt)),
     sortedHand, currentTierEnemies, currentDiscardValue, damageNeeded, isMyTurn, isSolo, isSpectator, discardRemaining, isImmuneWarning,
-    isChoosingNextPlayer,
     createGame, joinGame, sendAction, toggleCard, chooseNextPlayer, copyId, exitToMenu, restartTable, startNewGame, renamePlayer
   };
 };
