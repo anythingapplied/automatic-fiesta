@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEST_DIR, '../..');
-const API_BINARY = path.join(REPO_ROOT, 'target', 'debug', 'regicide-api');
+const API_BINARY = path.join(REPO_ROOT, 'target', 'debug', process.platform === 'win32' ? 'regicide-api.exe' : 'regicide-api');
 const API_PORT = 3000;
 const DEV_URL = 'http://localhost:5173';
 
